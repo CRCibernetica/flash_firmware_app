@@ -3,24 +3,26 @@ from tkinter import scrolledtext, messagebox
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 import os
-import subprocess
 import threading
 import serial
 import serial.tools.list_ports
 import queue
 import re
 import time
+import esptool
+import sys
+from io import StringIO
 
 class FirmwareFlasherApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Instalador IdeaBoard")
-        self.root.geometry("800x600")  # Increased window size
+        self.root.geometry("800x600")
         self.style = ttk.Style("litera")
 
         # Firmware file and baud rates
         self.firmware = "ideaboardfirmware03202025.bin"
-        self.flash_baud_rate = "921600"
+        self.flash_baud_rate = 921600  # Integer for esptool API
         self.serial_baud_rate = 115200
 
         # Queue for thread-safe communication
@@ -42,18 +44,15 @@ class FirmwareFlasherApp:
 
     def setup_ui(self):
         """Set up the modern UI layout with larger elements."""
-        # Main container
-        main_frame = ttk.Frame(self.root, padding=20)  # Increased padding
+        main_frame = ttk.Frame(self.root, padding=20)
         main_frame.pack(fill=BOTH, expand=True)
 
-        # Header
         header_label = ttk.Label(
-            main_frame, text="Instalador IdeaBoard", font=("Helvetica", 20, "bold")  # Larger font
+            main_frame, text="Instalador IdeaBoard", font=("Helvetica", 20, "bold")
         )
-        header_label.pack(pady=(0, 20))  # Increased padding
+        header_label.pack(pady=(0, 20))
 
-        # Control frame
-        control_frame = ttk.LabelFrame(main_frame, text="Control", padding=15)  # Larger padding
+        control_frame = ttk.LabelFrame(main_frame, text="Control", padding=15)
         control_frame.pack(fill=X, pady=10)
 
         self.flash_button = ttk.Button(
@@ -61,29 +60,27 @@ class FirmwareFlasherApp:
             text="Instalar Firmware",
             command=self.start_flash,
             style="primary.TButton",
-            width=25  # Wider button
+            width=25
         )
-        self.flash_button.configure(style="large.primary.TButton")  # Custom larger button style
+        self.flash_button.configure(style="large.primary.TButton")
         self.flash_button.pack(pady=10)
 
-        # Status label
         self.status_var = tk.StringVar(value="Listo")
         status_label = ttk.Label(
             control_frame,
             textvariable=self.status_var,
-            font=("Helvetica", 12),  # Larger font
+            font=("Helvetica", 12),
             bootstyle="info"
         )
         status_label.pack(pady=10)
 
-        # Terminal frame
-        terminal_frame = ttk.LabelFrame(main_frame, text="Consola", padding=15)  # Larger padding
+        terminal_frame = ttk.LabelFrame(main_frame, text="Consola", padding=15)
         terminal_frame.pack(fill=BOTH, expand=True, pady=10)
 
         self.terminal = scrolledtext.ScrolledText(
             terminal_frame,
-            height=22,  # Slightly taller
-            font=("Consolas", 12),  # Larger font
+            height=22,
+            font=("Consolas", 12),
             wrap=tk.WORD,
             bg="#2e2e2e",
             fg="#ffffff",
@@ -92,8 +89,7 @@ class FirmwareFlasherApp:
         self.terminal.pack(fill=BOTH, expand=True)
         self.terminal.config(state="disabled")
 
-        # Configure larger button style
-        self.style.configure("large.primary.TButton", font=("Helvetica", 14))  # Larger button font
+        self.style.configure("large.primary.TButton", font=("Helvetica", 14))
 
     def log(self, message):
         """Append message to the terminal widget."""
@@ -117,37 +113,18 @@ class FirmwareFlasherApp:
         self.flash_button.config(state="disabled")
         self.status_var.set("Instalando...")
         self.log("Starting firmware flashing process...")
-        # Stop any existing serial reading
         self.serial_running = False
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()
             self.serial_port = None
         threading.Thread(target=self.flash_firmware, daemon=True).start()
 
-    def run_command(self, cmd):
-        """Run a command and stream its output to the queue."""
-        try:
-            process = subprocess.Popen(
-                cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-            for line in process.stdout:
-                self.output_queue.put(line.strip())
-            for line in process.stderr:
-                self.output_queue.put(line.strip())
-            process.wait()
-            if process.returncode != 0:
-                self.output_queue.put(f"Command failed with return code {process.returncode}")
-                return False
-            return True
-        except Exception as e:
-            self.output_queue.put(f"Error running command: {str(e)}")
-            return False
+    def output_handler(self, message):
+        """Handle esptool output by sending it to the queue."""
+        if message:
+            clean_message = self.strip_ansi_codes(message.strip())
+            if clean_message:
+                self.output_queue.put(clean_message)
 
     def strip_ansi_codes(self, text):
         """Remove ANSI escape codes from text."""
@@ -195,11 +172,11 @@ class FirmwareFlasherApp:
             messagebox.showerror("Error", "No serial ports available. Please check your connections.")
             return None
 
-        dialog = ttk.Window(self.root, title="Select Serial Port", minsize=(400, 250))  # Larger dialog
+        dialog = ttk.Window(self.root, title="Select Serial Port", minsize=(400, 250))
         dialog.transient(self.root)
         dialog.grab_set()
 
-        ttk.Label(dialog, text="Select a serial port:", font=("Helvetica", 12)).pack(pady=15)  # Larger font
+        ttk.Label(dialog, text="Select a serial port:", font=("Helvetica", 12)).pack(pady=15)
         selected_port = tk.StringVar(value=port_list[0])
         for port in port_list:
             ttk.Radiobutton(
@@ -225,18 +202,15 @@ class FirmwareFlasherApp:
 
             # Define identifiers for CH340/CH341 chips
             ch340_identifiers = ["CH340", "CH341", "USB Serial"]
-            # Known Vendor ID and Product ID for CH340/CH341 (e.g., 1a86:7523)
             ch340_vid_pid = [(0x1A86, 0x7523), (0x1A86, 0x7522)]
 
             # Find the CH340 port
             ch340_port = None
             for port in ports:
                 self.output_queue.put(f"Port: {port.device}, Description: {port.description}, VID:PID: {port.vid}:{port.pid}")
-                # Check description for CH340/CH341 or USB Serial
                 if any(identifier in port.description for identifier in ch340_identifiers):
                     ch340_port = port.device
                     break
-                # Check VID:PID for CH340/CH341
                 if (port.vid, port.pid) in ch340_vid_pid:
                     ch340_port = port.device
                     break
@@ -264,33 +238,61 @@ class FirmwareFlasherApp:
                     self.status_var.set("Error: Port inaccessible")
                     return
 
-            # Commands
-            erase_cmd = f"python -m esptool --chip esp32 --port {ch340_port} erase_flash"
-            write_cmd = f"python -m esptool --chip esp32 --port {ch340_port} --baud {self.flash_baud_rate} write_flash 0x0 {self.firmware}"
+            # Redirect esptool output to capture it
+            output_buffer = StringIO()
+            sys.stdout = output_buffer
+            sys.stderr = output_buffer
 
-            # Erase flash memory
-            self.output_queue.put("Erasing flash memory...")
-            if not self.run_command(erase_cmd):
-                self.output_queue.put("Erase failed.")
-                self.status_var.set("Error: Erase failed")
+            try:
+                # Erase flash
+                self.output_queue.put("Erasing flash memory...")
+                esptool.main([
+                    "--chip", "esp32",
+                    "--port", ch340_port,
+                    "erase_flash"
+                ])
+                output = output_buffer.getvalue()
+                for line in output.splitlines():
+                    self.output_handler(line)
+                output_buffer.truncate(0)
+                output_buffer.seek(0)
+
+                # Write firmware
+                self.output_queue.put("Writing flash memory...")
+                esptool.main([
+                    "--chip", "esp32",
+                    "--port", ch340_port,
+                    "--baud", str(self.flash_baud_rate),
+                    "write_flash",
+                    "0x0",
+                    self.firmware
+                ])
+                output = output_buffer.getvalue()
+                for line in output.splitlines():
+                    self.output_handler(line)
+
+                self.output_queue.put("Done flashing.")
+                self.status_var.set("Instalacion terminada.")
+
+                # Start serial reading
+                self.output_queue.put(f"Opening serial port {ch340_port} at {self.serial_baud_rate} baud...")
+                self.serial_thread = threading.Thread(
+                    target=self.read_serial, args=(ch340_port,), daemon=True
+                )
+                self.serial_thread.start()
+
+            except esptool.FatalError as e:
+                self.output_queue.put(f"esptool error: {str(e)}")
+                self.status_var.set("Error: Flashing failed")
+                output = output_buffer.getvalue()
+                for line in output.splitlines():
+                    self.output_handler(line)
                 return
-
-            # Write the firmware
-            self.output_queue.put("Writing flash memory...")
-            if not self.run_command(write_cmd):
-                self.output_queue.put("Write failed.")
-                self.status_var.set("Error: Write failed")
-                return
-
-            self.output_queue.put("Done flashing.")
-            self.status_var.set("Instalacion terminada.")
-
-            # Start serial reading
-            self.output_queue.put(f"Opening serial port {ch340_port} at {self.serial_baud_rate} baud...")
-            self.serial_thread = threading.Thread(
-                target=self.read_serial, args=(ch340_port,), daemon=True
-            )
-            self.serial_thread.start()
+            finally:
+                # Restore stdout/stderr
+                sys.stdout = sys.__stdout__
+                sys.stderr = sys.__stderr__
+                output_buffer.close()
 
         except Exception as e:
             self.output_queue.put(f"Error: {str(e)}")
