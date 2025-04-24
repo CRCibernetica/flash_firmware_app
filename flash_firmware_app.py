@@ -11,7 +11,33 @@ import re
 import time
 import esptool
 import sys
-from io import StringIO
+import logging
+
+class OutputRedirector:
+    """Custom file-like object to redirect esptool output to the queue."""
+    def __init__(self, queue, output_handler):
+        self.queue = queue
+        self.output_handler = output_handler
+        self.buffer = []
+
+    def write(self, text):
+        self.buffer.append(text)
+        # Process complete lines
+        if '\n' in text:
+            lines = ''.join(self.buffer).splitlines()
+            for line in lines:
+                if line:
+                    self.output_handler(line)
+            self.buffer = []
+
+    def flush(self):
+        # Flush any remaining buffered content
+        if self.buffer:
+            lines = ''.join(self.buffer).splitlines()
+            for line in lines:
+                if line:
+                    self.output_handler(line)
+            self.buffer = []
 
 class FirmwareFlasherApp:
     def __init__(self, root):
@@ -22,7 +48,7 @@ class FirmwareFlasherApp:
 
         # Firmware file and baud rates
         self.firmware = "ideaboardfirmware03202025.bin"
-        self.flash_baud_rate = 921600  # Integer for esptool API
+        self.flash_baud_rate = 921600
         self.serial_baud_rate = 115200
 
         # Queue for thread-safe communication
@@ -238,10 +264,19 @@ class FirmwareFlasherApp:
                     self.status_var.set("Error: Port inaccessible")
                     return
 
-            # Redirect esptool output to capture it
-            output_buffer = StringIO()
-            sys.stdout = output_buffer
-            sys.stderr = output_buffer
+            # Set up output redirection
+            output_redirector = OutputRedirector(self.output_queue, self.output_handler)
+            original_stdout = sys.stdout
+            original_stderr = sys.stderr
+            sys.stdout = output_redirector
+            sys.stderr = output_redirector
+
+            # Configure esptool logging to use our handler
+            logger = logging.getLogger('esptool')
+            logger.setLevel(logging.INFO)
+            handler = logging.StreamHandler(output_redirector)
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            logger.addHandler(handler)
 
             try:
                 # Erase flash
@@ -251,11 +286,7 @@ class FirmwareFlasherApp:
                     "--port", ch340_port,
                     "erase_flash"
                 ])
-                output = output_buffer.getvalue()
-                for line in output.splitlines():
-                    self.output_handler(line)
-                output_buffer.truncate(0)
-                output_buffer.seek(0)
+                output_redirector.flush()
 
                 # Write firmware
                 self.output_queue.put("Writing flash memory...")
@@ -267,9 +298,7 @@ class FirmwareFlasherApp:
                     "0x0",
                     self.firmware
                 ])
-                output = output_buffer.getvalue()
-                for line in output.splitlines():
-                    self.output_handler(line)
+                output_redirector.flush()
 
                 self.output_queue.put("Done flashing.")
                 self.status_var.set("Instalacion terminada.")
@@ -284,15 +313,13 @@ class FirmwareFlasherApp:
             except esptool.FatalError as e:
                 self.output_queue.put(f"esptool error: {str(e)}")
                 self.status_var.set("Error: Flashing failed")
-                output = output_buffer.getvalue()
-                for line in output.splitlines():
-                    self.output_handler(line)
+                output_redirector.flush()
                 return
             finally:
-                # Restore stdout/stderr
-                sys.stdout = sys.__stdout__
-                sys.stderr = sys.__stderr__
-                output_buffer.close()
+                # Restore stdout/stderr and remove logger handler
+                sys.stdout = original_stdout
+                sys.stderr = original_stderr
+                logger.removeHandler(handler)
 
         except Exception as e:
             self.output_queue.put(f"Error: {str(e)}")
